@@ -33,7 +33,18 @@ local mock so the demo always runs (`server/src/config.js` `modes()`).
 | `yolo` | always (ONNX in the browser) |
 
 On the challenge VM the server also loads `/config/*.config`, so search, Cosmos, and embeddings go
-live with no `.env` edits.
+live with no `.env` edits. The shared GPU host rejects calls without `GPU_BEARER_TOKEN` (401), which
+also comes from the team config.
+
+## Check the stack
+
+```sh
+npm run check
+```
+
+Runs the checks from the challenge `ARCHITECTURE_REFERENCE.md` and skills: per-model GPU health
+(Cosmos3-Reason, Embed1, YOLO11, Canary-1B), VSS login, metadata schema, explore, the highway and
+driving example queries, agent Q&A, and a W&B completion. Exits non-zero if anything fails.
 
 ## Demo script
 
