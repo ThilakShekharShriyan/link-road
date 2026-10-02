@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev --prefix web\" \"npm run dev --prefix server\"",
+    "check": "npm run check --prefix server",
     "install:all": "npm install --prefix web && npm install --prefix server"
   },
   "devDependencies": {
