@@ -36,6 +36,15 @@ On the challenge VM the server also loads `/config/*.config`, so search, Cosmos,
 live with no `.env` edits. The shared GPU host rejects calls without `GPU_BEARER_TOKEN` (401), which
 also comes from the team config.
 
+## Cursor skills
+
+`.cursor/skills/` holds the VAST Builders Challenge skills (from
+[vast-data/vast-builders-challenge](https://github.com/vast-data/vast-builders-challenge) at `4987d8e`):
+`retrieval/` (login, search, agent-qa, videos, dashboard, list-metadata, suggest-prompts, vastdb-read),
+`ingest/` (upload, reingest-videos, reingest-chunk), `gpu/`, `deployment/`, `ask-cosmos`, and
+`submission`. `.cursor/rules/build-day.mdc` applies the challenge ground rules to every session.
+They read credentials from `/config/<team>.config`, so they work on the workshop VM.
+
 ## Check the stack
 
 ```sh
