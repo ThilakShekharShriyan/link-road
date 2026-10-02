@@ -39,8 +39,11 @@ function laneIn(text) {
   return null
 }
 
+const normalize = (text) =>
+  ` ${String(text || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()} `
+
 function mockAgent(text) {
-  const raw = ` ${String(text || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()} `
+  const raw = normalize(text)
   const lane = laneIn(raw)
 
   if (/\b(find|search|show|where|locate|look for)\b/.test(raw)) {
@@ -85,8 +88,12 @@ export async function runAgent(text, snapshot = {}) {
       json: true,
     })
     const parsed = result.json
-    if (!parsed?.action) return { ...fallback, provider: 'wandb-fallback' }
-    return { ...fallback, ...parsed, provider: result.provider }
+    if (!parsed?.action || (parsed.action === 'error' && fallback.action !== 'error')) {
+      return { ...fallback, provider: 'wandb-fallback' }
+    }
+    // The LLM often echoes the user's 1-based lane number despite the 0-based prompt.
+    const lane = laneIn(normalize(text)) ?? parsed.lane
+    return { ...fallback, ...parsed, lane, provider: result.provider }
   } catch {
     return { ...fallback, provider: 'mock' }
   }
