@@ -7,6 +7,7 @@ export const CAM_BACK = 44
 export const DROP_AHEAD = 150
 
 const DROP_MAX = 400
+const FOOTAGE_AHEAD = 280
 const CRUISE = 24
 const LOCAL_AHEAD = 200
 const LOCAL_BEHIND = 30
@@ -14,6 +15,8 @@ const PLAN_AHEAD = 260
 const LC_TIME = 3.6
 const SIGNAL_TIME = 0.8
 const HARD_BRAKE = 4.0
+const SCAN_RANGE = 250
+const SCAN_ANY_LANE = 60
 
 export const SPECS = {
   sedan: { L: 4.7, W: 1.84, H: 1.44 },
@@ -33,7 +36,20 @@ const HAZARDS = {
   slow: { scope: 'lane', blocks: true, vehicle: 'hatch', speed: 13, sense: 120, color: '#f08a24' },
   'custom-road': { scope: 'road', blocks: true, len: 2.4, sense: 50 },
   'custom-lane': { scope: 'lane', blocks: true, vehicle: 'van', speed: 15, sense: 120, color: '#a7b0bd' },
+  footage: { scope: 'lane', blocks: true, len: 1.4, sense: 45 },
 }
+
+const INCIDENT_SIZE = {
+  person: { L: 0.6, W: 0.7, H: 1.75 },
+  people: { L: 2, W: 2.6, H: 1.75 },
+  animal: { L: 1.9, W: 0.7, H: 1.5 },
+  bike: { L: 1.8, W: 0.6, H: 1.7 },
+  crash: { L: 7, W: 3.2, H: 1.5 },
+  crate: { L: 1.4, W: 1.4, H: 0.9 },
+  pothole: { L: 1.6, W: 1.6, H: 0.18 },
+}
+
+const unresolved = (h) => h.state === 'pending' || h.state === 'scanning'
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 const isCar = (o) => o.home !== undefined
@@ -41,7 +57,8 @@ const isCar = (o) => o.home !== undefined
 export const laneCenter = (lane) => (lane + 0.5) * LANE_W
 export const laneAt = (x) => clamp(Math.floor(x / LANE_W), 0, LANES - 1)
 export const leadZ = (sim) => Math.max(...sim.cars.map((c) => c.z))
-export const dropZ = (sim, z) => clamp(z, leadZ(sim) + DROP_AHEAD, leadZ(sim) + DROP_MAX)
+export const dropZ = (sim, z, kind) =>
+  clamp(z, leadZ(sim) + (kind === 'footage' ? FOOTAGE_AHEAD : DROP_AHEAD), leadZ(sim) + DROP_MAX)
 
 export function createSim(link = true) {
   const meanZ = CARS.reduce((sum, c) => sum + c.z, 0) / CARS.length
@@ -49,6 +66,8 @@ export function createSim(link = true) {
     ...c,
     ...SPECS[c.kind],
     home: c.lane,
+    commanded: false,
+    arrived: false,
     lane: c.lane,
     target: null,
     signal: 0,
@@ -72,6 +91,7 @@ export function createSim(link = true) {
     yieldFor: null,
     yieldUntil: 0,
     dropUntil: 0,
+    dropV: CRUISE,
     linkedUntil: 0,
     status: link ? 'idle' : 'solo',
     note: '',
@@ -84,6 +104,7 @@ export function createSim(link = true) {
     camZ: meanZ - CAM_BACK,
     events: [],
     arcs: [],
+    scans: [],
     said: new Map(),
     stats: { hardBrakes: 0, messages: 0 },
     nextId: 1,
@@ -142,7 +163,7 @@ export function addHazard(sim, item, x, z) {
   const vspec = spec.vehicle ? SPECS[spec.vehicle] : null
   const L = vspec ? vspec.L : spec.len
   const lane = laneAt(x)
-  z = dropZ(sim, z)
+  z = dropZ(sim, z, item.kind)
 
   if (spec.blocks) {
     for (let pass = 0; pass < 3; pass += 1) {
@@ -180,6 +201,12 @@ export function addHazard(sim, item, x, z) {
   }
   sim.hazards.push(h)
 
+  if (item.kind === 'footage') {
+    Object.assign(h, { state: 'pending', media: item.media, label: '???', H: 1.1, scanner: null })
+    say(sim, null, `SOMETHING IS IN LANE ${lane + 1}. NO CAR HAS SEEN IT YET.`)
+    return
+  }
+
   say(sim, null, h.sign ? `A WILD ${h.label} APPEARED! LIMIT 40 MPH.` : `A WILD ${h.label} APPEARED IN LANE ${lane + 1}!`)
   perceive(sim)
   say(sim, null, summary(sim, h))
@@ -211,18 +238,84 @@ function perceive(sim) {
       if (ahead < -(h.L + c.L) / 2) continue
       const laneGap = h.lane < 0 ? 0 : Math.abs(carLane(c) - h.lane)
       let via = null
-      if (sim.link && inScope(h, ahead, laneGap)) via = 'link'
+      if (sim.link && !unresolved(h) && inScope(h, ahead, laneGap)) via = 'link'
       else if (ahead < h.sense) via = 'sensor'
       if (!via) continue
       c.known.set(h.id, via)
       if (via === 'link') {
         sim.stats.messages += 1
         c.linkedUntil = sim.t + 2.5
-        sim.arcs.push({ from: { hazard: h.id }, to: c.id, t0: sim.t + Math.max(0, ahead) / 520, kind: 'warn' })
+        const from = h.scanner ? { car: h.scanner } : { hazard: h.id }
+        sim.arcs.push({ from, to: c.id, t0: sim.t + Math.max(0, ahead) / 520, kind: 'warn' })
         if (h.scope === 'lane' && sim.t - h.born > 0.5) say(sim, c.short, `${h.label} IS CLOSE NOW. JOINING THE LINK.`)
       }
     }
   }
+}
+
+function scan(sim) {
+  for (const h of sim.hazards) {
+    if (h.state !== 'pending') continue
+    let best = null
+    for (const c of sim.cars) {
+      const ahead = h.z - c.z
+      const laneGap = Math.abs(carLane(c) - h.lane)
+      if (ahead <= 0 || ahead > SCAN_RANGE || (laneGap > 1 && ahead > SCAN_ANY_LANE)) continue
+      if (!best || ahead < best.ahead) best = { c, ahead }
+    }
+    if (!best) continue
+    h.state = 'scanning'
+    h.scanner = best.c.id
+    h.scanAt = sim.t
+    sim.scans.push({ hazard: h.id, car: best.c.id, media: h.media, lane: h.lane })
+    say(sim, best.c.short, `UNKNOWN OBJECT ${Math.round(best.ahead)} M AHEAD IN LANE ${h.lane + 1}. SCANNING...`)
+  }
+}
+
+export function resolveHazard(sim, id, incident) {
+  const h = sim.hazards.find((o) => o.id === id)
+  if (!h || !unresolved(h)) return null
+  const scanner = sim.cars.find((c) => c.id === h.scanner)
+  const who = scanner?.short ?? null
+  h.state = 'known'
+  h.incident = incident
+
+  if (!incident.blocks) {
+    sim.hazards = sim.hazards.filter((o) => o !== h)
+    for (const c of sim.cars) c.known.delete(h.id)
+    say(sim, who, 'SCAN DONE. NOTHING ON THE ROAD.')
+    say(sim, null, 'FALSE ALARM. NOBODY HAS TO CHANGE LANES.')
+    return { heard: [] }
+  }
+
+  const size = INCIDENT_SIZE[incident.model] || INCIDENT_SIZE.crate
+  if (incident.type === 'pothole' || incident.model === 'pothole') {
+    Object.assign(h, { kind: 'pothole', blocks: true, L: 1.6, W: 1.6, H: 0.18 })
+  } else if (incident.model === 'car') {
+    Object.assign(h, { vehicle: 'sedan', color: '#8d96a3', ...SPECS.sedan })
+  } else {
+    Object.assign(h, size)
+  }
+  Object.assign(h, {
+    label: incident.label,
+    scope: incident.scope,
+    caution: incident.caution,
+    sense: 60,
+    born: sim.t,
+  })
+  if (scanner) scanner.known.set(h.id, 'sensor')
+  const pct = Math.round(incident.confidence * 100)
+  say(sim, who, `YOLO SEES ${incident.seen}. ${incident.label} IN LANE ${h.lane + 1}, ${pct}% SURE.`)
+  if (incident.summary) say(sim, null, String(incident.summary).toUpperCase().slice(0, 160))
+  perceive(sim)
+  const heard = sim.cars.filter((c) => c.known.get(h.id) === 'link').map((c) => c.short)
+  if (sim.link && scanner) {
+    scanner.linkedUntil = sim.t + 3
+    say(sim, null, heard.length ? `${who} SHARED IT. ${summary(sim, h)}` : `${who} POSTED IT. CARS NEAR LANE ${h.lane + 1} PICK IT UP AS THEY CLOSE IN.`)
+  } else {
+    say(sim, null, summary(sim, h))
+  }
+  return { heard }
 }
 
 function leadFor(sim, c) {
@@ -261,14 +354,16 @@ function laneThreat(sim, c, lane, horizon) {
   return best
 }
 
-function gapCheck(sim, c, lane) {
+function gapCheck(sim, c, lane, urgent = false) {
   let lead = null
   let follower = null
   for (const o of [...sim.cars, ...actorsOf(sim)]) {
     if (o === c || !claimLanes(o).includes(lane)) continue
     const dz = o.z - c.z
     const sep = (o.L + c.L) / 2
-    if (Math.abs(dz) < sep + 3) return { ok: false, leadOk: false, leadGap: 0, follower: dz < 0 ? o : null }
+    if (Math.abs(dz) < sep + 3) {
+      return { ok: false, leadOk: false, leadGap: 0, follower: dz < 0 ? o : null, followerGap: 0, blocker: o }
+    }
     if (dz > 0) {
       const gap = dz - sep
       if (!lead || gap < lead.gap) lead = { o, gap }
@@ -282,19 +377,26 @@ function gapCheck(sim, c, lane) {
     const d = h.z - c.z
     if (d > -h.L && d < 70) return { ok: false, leadOk: false, leadGap: 0, follower: null }
   }
-  const leadOk = !lead || (lead.gap > 10 && iidm(c.v, CRUISE, lead.gap, c.v - lead.o.v) > -2)
+  const leadOk = !lead || (lead.gap > (urgent ? 6 : 10) && iidm(c.v, CRUISE, lead.gap, c.v - lead.o.v) > (urgent ? -3 : -2))
   let followerOk = true
   if (follower) {
     const f = follower.o
     const af = iidm(f.v, f.v0 ?? CRUISE, follower.gap, f.v - c.v)
-    followerOk = follower.gap > 8 && af > -2.5
+    followerOk = follower.gap > (urgent ? 6 : 8) && af > (urgent ? -3 : -2.5)
   }
   return {
     ok: leadOk && followerOk,
     leadOk,
     leadGap: lead ? lead.gap : 999,
     follower: followerOk ? null : follower?.o ?? null,
+    followerGap: follower ? follower.gap : 999,
+    blocker: leadOk ? null : lead?.o ?? null,
   }
+}
+
+function dropBack(sim, c, blocker) {
+  c.dropUntil = sim.t + 0.6
+  c.dropV = Math.min(CRUISE - 3, (blocker?.v ?? CRUISE) - 3)
 }
 
 function plan(sim, c) {
@@ -307,7 +409,7 @@ function plan(sim, c) {
     )
     if (!options.length) return
     const checks = options
-      .map((l) => ({ l, ...gapCheck(sim, c, l) }))
+      .map((l) => ({ l, ...gapCheck(sim, c, l, threat.d < 140) }))
       .sort(
         (a, b) =>
           Number(b.ok) - Number(a.ok) ||
@@ -315,19 +417,72 @@ function plan(sim, c) {
           Math.abs(a.l - c.home) - Math.abs(b.l - c.home),
       )
     const pick = checks[0]
-    if (pick.ok) startLaneChange(sim, c, pick.l, threat)
-    else {
-      if (!pick.leadOk) c.dropUntil = sim.t + 0.6
-      if (sim.link && pick.follower && isCar(pick.follower)) requestYield(sim, c, pick.follower, pick.l)
+    if (pick.ok) {
+      startLaneChange(sim, c, pick.l, threat)
+      return
     }
+    const f = sim.link && pick.follower && isCar(pick.follower) ? pick.follower : null
+    if (f && pick.followerGap < 15) {
+      letPass(sim, c, f, pick.l)
+      return
+    }
+    if (!pick.leadOk) dropBack(sim, c, pick.blocker)
+    if (f) requestYield(sim, c, f, pick.l)
     return
   }
-  if (c.lane !== c.home && sim.t - c.lastLc > 5) {
+  if (c.lane !== c.home && sim.t - c.lastLc > (c.commanded ? 0.5 : 5)) {
     const l = c.lane + Math.sign(c.home - c.lane)
     if (laneThreat(sim, c, l, PLAN_AHEAD + 140)) return
     const check = gapCheck(sim, c, l)
-    if (check.ok && check.leadGap > 25) startLaneChange(sim, c, l, null)
+    if (check.ok && (c.commanded || check.leadGap > 25)) startLaneChange(sim, c, l, null)
+    else if (c.commanded) {
+      const canAsk = sim.link && check.follower && isCar(check.follower)
+      if (canAsk) requestYield(sim, c, check.follower, l)
+      if (!check.leadOk || !canAsk) dropBack(sim, c, check.blocker)
+    }
   }
+}
+
+export function commandLane(sim, id, lane) {
+  const c = sim.cars.find((o) => o.id === id)
+  if (!c) return
+  const current = c.target ?? c.lane
+  if (lane === current) {
+    c.home = lane
+    c.commanded = false
+    say(sim, c.short, `ALREADY IN LANE ${lane + 1}.`)
+    return
+  }
+  const blocked = sim.hazards.find(
+    (h) => h.blocks && h.lane === lane && c.known.has(h.id) && h.z > c.z && h.z - c.z < PLAN_AHEAD,
+  )
+  if (blocked) {
+    say(sim, c.short, `${blocked.label} AHEAD IN LANE ${lane + 1}. STAYING IN LANE ${current + 1}.`)
+    return
+  }
+
+  c.home = lane
+  c.commanded = true
+  c.nextPlan = 0
+  c.lastLc = -10
+  say(sim, c.short, `SIGNALING ${lane < current ? 'LEFT' : 'RIGHT'}. HEADING FOR LANE ${lane + 1}.`)
+  if (!sim.link) {
+    say(sim, null, 'LINK IS OFF. NEIGHBORS ONLY SEE THE BLINKER.')
+    return
+  }
+
+  const lo = Math.min(current, lane)
+  const hi = Math.max(current, lane)
+  const told = sim.cars.filter(
+    (o) => o !== c && Math.abs(o.z - c.z) < 80 && claimLanes(o).some((l) => l >= lo && l <= hi),
+  )
+  for (const o of told) {
+    sim.stats.messages += 1
+    o.linkedUntil = sim.t + 2.5
+    sim.arcs.push({ from: { car: c.id }, to: o.id, t0: sim.t, kind: 'intent' })
+  }
+  c.linkedUntil = sim.t + 2.5
+  say(sim, null, told.length ? `${names(told)} GOT ${c.short}'S PLAN.` : `NOBODY NEARBY. ${c.short} HAS ROOM.`)
 }
 
 function startLaneChange(sim, c, lane, threat) {
@@ -343,7 +498,7 @@ function startLaneChange(sim, c, lane, threat) {
     if (!c.told.has(key)) {
       c.told.add(key)
       const d = Math.round(threat.d)
-      if (c.known.get(h.id) === 'link') {
+      if (c.known.get(h.id) === 'link' || d > 80) {
         say(sim, c.short, `${h.label} IN LANE ${c.lane + 1}, ${d} M OUT. SHIFTING TO LANE ${lane + 1}.`)
       } else {
         say(sim, c.short, `${h.label} AT ${d} M! SWERVING TO LANE ${lane + 1}.`)
@@ -373,11 +528,24 @@ function requestYield(sim, c, f, lane) {
   say(sim, f.short, `EASING OFF. GAP OPENING FOR ${c.short}.`)
 }
 
+function letPass(sim, c, f, lane) {
+  dropBack(sim, c, f)
+  if (f.yieldFor === c.id) f.yieldUntil = 0
+  if (c.told.has(`pass-${f.id}`)) return
+  c.told.add(`pass-${f.id}`)
+  c.linkedUntil = sim.t + 3
+  f.linkedUntil = sim.t + 3
+  sim.stats.messages += 1
+  sim.arcs.push({ from: { car: c.id }, to: f.id, t0: sim.t, kind: 'intent' })
+  say(sim, c.short, `${f.short}, GO AHEAD. I'LL TUCK IN BEHIND YOU INTO LANE ${lane + 1}.`)
+}
+
 function desiredSpeed(sim, c, meanZ) {
   let v0 = CRUISE + clamp((c.slot - (c.z - meanZ)) * 0.05, -1.2, 1.2)
   if (c.yieldUntil > sim.t) v0 = Math.min(v0, CRUISE - 5)
-  if (c.dropUntil > sim.t) v0 = Math.min(v0, CRUISE - 3)
+  if (c.dropUntil > sim.t) v0 = Math.min(v0, c.dropV)
   for (const h of sim.hazards) {
+    if (h.state === 'scanning' && h.scanner === c.id) v0 = Math.min(v0, CRUISE - 3)
     const via = c.known.get(h.id)
     if (!via) continue
     const ahead = h.z - c.z
@@ -392,13 +560,15 @@ function desiredSpeed(sim, c, meanZ) {
         say(sim, c.short, `${h.label} AT ${Math.round(ahead)} M! SLOWING DOWN.`)
       }
     }
-    if (h.vehicle === 'police' && Math.abs(carLane(c) - h.lane) === 1 && ahead > -8 && ahead < 160) {
+    const careful = h.vehicle === 'police' || h.caution
+    if (careful && Math.abs(carLane(c) - h.lane) === 1 && ahead > -8 && ahead < 100) {
       const slow = CRUISE - 6
       const d = ahead - 40
       v0 = Math.min(v0, d > 0 ? Math.sqrt(slow ** 2 + 2 * 0.9 * d) : slow)
       if (!h.announced.has('move-over')) {
         h.announced.add('move-over')
-        say(sim, null, `POLICE STOPPED IN LANE ${h.lane + 1}. NEIGHBOR LANES EASE OFF.`)
+        const what = h.vehicle === 'police' ? 'POLICE STOPPED' : h.label
+        say(sim, null, `${what} IN LANE ${h.lane + 1}. NEIGHBOR LANES EASE OFF.`)
       }
     }
   }
@@ -428,6 +598,10 @@ function updateLaneChange(c, dt) {
   if (c.lcT >= 1) {
     c.lane = c.target
     c.target = null
+    if (c.commanded && c.lane === c.home) {
+      c.commanded = false
+      c.arrived = true
+    }
     c.x = laneCenter(c.lane)
     c.lat = 0
     c.yaw = 0
@@ -455,7 +629,7 @@ function statuses(sim) {
     if (sim.link) {
       if (c.linkedUntil > sim.t) status = 'linked'
       for (const h of sim.hazards) {
-        if (h.cleared) continue
+        if (h.cleared || unresolved(h)) continue
         const via = c.known.get(h.id)
         if (via === 'link') {
           status = 'linked'
@@ -478,6 +652,7 @@ function statuses(sim) {
 
 export function step(sim, dt) {
   sim.t += dt
+  scan(sim)
   perceive(sim)
   const meanZ = sim.cars.reduce((sum, c) => sum + c.z, 0) / sim.cars.length
   for (const c of sim.cars) plan(sim, c)
@@ -493,6 +668,10 @@ export function step(sim, dt) {
     c.z += c.v * dt
     updateLaneChange(c, dt)
     comfort(sim, c, dt)
+    if (c.arrived) {
+      c.arrived = false
+      say(sim, c.short, `IN LANE ${c.lane + 1}. ${sim.link ? 'THANKS FOR THE ROOM.' : 'MADE IT.'}`)
+    }
   })
 
   const actors = actorsOf(sim)

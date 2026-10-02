@@ -50,6 +50,18 @@ export function ItemSprite({ id }) {
       </svg>
     )
   }
+  if (id === 'footage' || id === 'upload') {
+    return (
+      <svg viewBox="0 0 16 16" shapeRendering="crispEdges" aria-hidden="true">
+        <rect x="2" y="5" width="9" height="7" fill="#2b3350" />
+        <rect x="3" y="6" width="7" height="5" fill="#6fb3e8" />
+        <rect x="4" y="9" width="5" height="2" fill="#6aa84f" />
+        <rect x="11" y="6" width="3" height="5" fill="#2b3350" />
+        <rect x="4" y="3" width="2" height="2" fill="#e8353b" />
+        {id === 'upload' && <rect x="6" y="7" width="1" height="3" fill="#fbf8ec" />}
+      </svg>
+    )
+  }
   return (
     <svg viewBox="0 0 16 16" shapeRendering="crispEdges" aria-hidden="true">
       <rect x="3" y="3" width="10" height="10" fill="#f8d848" />

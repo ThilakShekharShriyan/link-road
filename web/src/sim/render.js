@@ -805,6 +805,84 @@ function crateObject(cam, h, list) {
   })
 }
 
+function solid(ctx, cam, place, verts, style) {
+  drawSolid(ctx, cam, verts.map((v) => place(v, false)), style)
+}
+
+function personParts(ctx, cam, place, seed) {
+  const shirts = ['#f2742b', '#3b7bd8', '#d8d24a', '#c8423e', '#4aa36b']
+  const shirt = rgb(shirts[seed % shirts.length])
+  const pants = rgb('#2c3448')
+  const skin = rgb(['#e7b98f', '#b77b52', '#8a5a3a'][seed % 3])
+  for (const dx of [-0.11, 0.11]) solid(ctx, cam, place, box(0.08, 0, 0.86, -0.1, 0.1).map((v) => [v[0] + dx, v[1], v[2]]), { color: pants })
+  solid(ctx, cam, place, box(0.21, 0.84, 1.46, -0.13, 0.13), { color: shirt })
+  for (const dx of [-0.27, 0.27]) solid(ctx, cam, place, box(0.06, 0.9, 1.42, -0.07, 0.07).map((v) => [v[0] + dx, v[1], v[2]]), { color: shirt })
+  solid(ctx, cam, place, box(0.11, 1.5, 1.75, -0.11, 0.11), { color: skin, top: rgb('#2a211c') })
+}
+
+function incidentObjects(cam, h, sim, list) {
+  const p = proj(cam, [h.x, 0, h.z])
+  if (!p) return
+  const model = h.incident?.model
+  const t = sim.t
+  list.push({
+    d: p[2],
+    draw: (ctx) => {
+      if (!h.incident) {
+        const place = poseFn({ x: h.x, z: h.z })
+        solid(ctx, cam, place, hexa(0.72, 0, -0.62, 0.62, 0.42, 1.0, -0.36, 0.36), {
+          color: rgb('#6f7a8c'),
+          top: rgb('#8a95a8'),
+          decals: { rear: [{ u0: 0.15, v0: 0.62, u1: 0.85, v1: 0.72, color: rgb('#4c5566') }] },
+        })
+        return
+      }
+      if (model === 'person' || model === 'bike') {
+        const place = poseFn({ x: h.x, z: h.z })
+        if (model === 'bike') {
+          const side = poseFn({ x: h.x + 0.45, z: h.z, yaw: Math.PI / 2 })
+          for (const dz of [-0.55, 0.55]) solid(ctx, cam, side, box(0.03, 0, 0.66, dz - 0.33, dz + 0.33), { color: TIRE, edge: false })
+          solid(ctx, cam, side, box(0.03, 0.4, 0.5, -0.5, 0.5), { color: rgb('#d63b3b') })
+        }
+        personParts(ctx, cam, place, h.seed)
+      } else if (model === 'people') {
+        for (let i = 0; i < 3; i += 1) {
+          const place = poseFn({ x: h.x + (i - 1) * 0.85, z: h.z + (hash(h.seed + i) - 0.5) * 1.4, yaw: (hash(h.seed + i + 4) - 0.5) * 0.8 })
+          personParts(ctx, cam, place, h.seed + i)
+        }
+      } else if (model === 'animal') {
+        const place = poseFn({ x: h.x, z: h.z, yaw: Math.PI / 2 + Math.sin(t * 0.7 + h.seed) * 0.15 })
+        const fur = rgb('#9a6a3e')
+        for (const [dx, dz] of [[-0.14, -0.62], [0.14, -0.62], [-0.14, 0.62], [0.14, 0.62]]) {
+          solid(ctx, cam, place, box(0.05, 0, 0.78, dz - 0.05, dz + 0.05).map((v) => [v[0] + dx, v[1], v[2]]), { color: rgb('#6e4a2a') })
+        }
+        solid(ctx, cam, place, box(0.22, 0.72, 1.12, -0.8, 0.8), { color: fur, top: rgb('#b07c4c') })
+        solid(ctx, cam, place, hexa(0.1, 1.0, 0.62, 0.86, 0.08, 1.42, 0.8, 0.98), { color: fur })
+        solid(ctx, cam, place, box(0.1, 1.36, 1.56, 0.82, 1.14), { color: fur, front: rgb('#3a2516') })
+      } else if (model === 'crash') {
+        const parts = [
+          { x: h.x - 0.7, z: h.z - 1.6, yaw: 0.55, kind: 'sedan', color: '#c8423e' },
+          { x: h.x + 0.9, z: h.z + 1.7, yaw: -1.05, kind: 'hatch', color: '#8d96a3' },
+        ]
+        for (let i = 0; i < 9; i += 1) {
+          const sx = h.x + (hash(h.seed + i) - 0.5) * 3
+          const sz = h.z + (hash(h.seed + i + 9) - 0.5) * 3
+          groundQuad(ctx, cam, sx - 0.1, sx + 0.1, sz - 0.07, sz + 0.07, rgb(i % 2 ? '#cfd6de' : '#7a2424'), 0.01)
+        }
+        for (const part of parts) {
+          drawVehicle(ctx, cam, part, part.kind, part.color, { brake: true, signal: 0, hazard: true }, t)
+        }
+      } else {
+        drawSolid(ctx, cam, box(0.7, 0, 0.9, -0.7, 0.7).map((v) => [v[0] + h.x, v[1], v[2] + h.z]), {
+          color: rgb('#a8733f'),
+          top: rgb('#c98d50'),
+          decals: { rear: [{ u0: 0.1, v0: 0.45, u1: 0.9, v1: 0.55, color: rgb('#6b4523') }] },
+        })
+      }
+    },
+  })
+}
+
 function speedSignObjects(cam, h, sim, list) {
   const p = proj(cam, [h.x, 0, h.z])
   if (!p) return
@@ -862,7 +940,7 @@ function speedSignObjects(cam, h, sim, list) {
 function vehicleState(c) {
   return {
     brake: c.a < -0.7 || c.v < 0.5,
-    signal: c.target != null ? Math.sign(c.target - c.lane) : 0,
+    signal: Math.sign((c.target ?? (c.commanded ? c.home : c.lane)) - c.lane),
     hazard: false,
   }
 }
@@ -902,6 +980,138 @@ function drawRings(ctx, cam, sim) {
     } else if (c.status === 'quiet') {
       ring(ctx, cam, c.x, c.z, r, '#b6bcc6', 0.55, 1.2, [4, 4])
     }
+  }
+}
+
+function drawIntents(ctx, cam, sim) {
+  for (const c of sim.cars) {
+    if (!c.commanded) continue
+    const pts = []
+    for (let i = 0; i <= 24; i += 1) {
+      const u = i / 24
+      const ease = u * u * (3 - 2 * u)
+      const p = proj(cam, [c.x + (laneCenter(c.home) - c.x) * ease, 0.04, c.z + c.L / 2 + 2 + u * 50])
+      if (p) pts.push(p)
+    }
+    if (pts.length < 2) continue
+    ctx.save()
+    ctx.strokeStyle = '#ffb21a'
+    ctx.lineWidth = 3
+    ctx.setLineDash([10, 8])
+    ctx.lineDashOffset = -sim.t * 40
+    ctx.shadowColor = '#ffb21a'
+    ctx.shadowBlur = 10
+    ctx.beginPath()
+    pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])))
+    ctx.stroke()
+    ctx.restore()
+  }
+}
+
+function screenBox(cam, h) {
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const dx of [-h.W / 2, h.W / 2]) {
+    for (const dz of [-h.L / 2, h.L / 2]) {
+      for (const y of [0, h.H]) {
+        const p = proj(cam, [h.x + dx, y, h.z + dz])
+        if (!p) return null
+        x0 = Math.min(x0, p[0])
+        y0 = Math.min(y0, p[1])
+        x1 = Math.max(x1, p[0])
+        y1 = Math.max(y1, p[1])
+      }
+    }
+  }
+  const pad = 3
+  return { x: x0 - pad, y: y0 - pad, w: x1 - x0 + pad * 2, h: y1 - y0 + pad * 2 }
+}
+
+function brackets(ctx, b, color, k) {
+  const len = Math.max(4, Math.min(b.w, b.h) * k)
+  ctx.beginPath()
+  for (const [x, y, sx, sy] of [[b.x, b.y, 1, 1], [b.x + b.w, b.y, -1, 1], [b.x, b.y + b.h, 1, -1], [b.x + b.w, b.y + b.h, -1, -1]]) {
+    ctx.moveTo(x + sx * len, y)
+    ctx.lineTo(x, y)
+    ctx.lineTo(x, y + sy * len)
+  }
+  ctx.strokeStyle = color
+  ctx.stroke()
+}
+
+function drawScans(ctx, cam, sim) {
+  for (const h of sim.hazards) {
+    if (h.kind !== 'footage') continue
+    const b = screenBox(cam, h)
+    if (h.state === 'pending') {
+      const pulse = 0.5 + 0.5 * Math.sin(sim.t * 4)
+      ring(ctx, cam, h.x, h.z, 2.2 + pulse * 0.6, '#ffb21a', 0.5 + pulse * 0.3, 1.6, [5, 5])
+      continue
+    }
+    if (h.state === 'scanning') {
+      const c = sim.cars.find((o) => o.id === h.scanner)
+      if (c) {
+        const nose = c.z + c.L / 2
+        const pts = [
+          proj(cam, [c.x - 0.6, 0.05, nose]),
+          proj(cam, [h.x - 2.4, 0.05, h.z]),
+          proj(cam, [h.x + 2.4, 0.05, h.z]),
+          proj(cam, [c.x + 0.6, 0.05, nose]),
+        ]
+        if (pts.every(Boolean)) {
+          ctx.save()
+          path(ctx, pts)
+          ctx.fillStyle = 'rgba(63,242,255,0.16)'
+          ctx.fill()
+          const u = (sim.t * 1.4) % 1
+          const zs = nose + (h.z - nose) * u
+          const xs = c.x + (h.x - c.x) * u
+          const half = 0.6 + 1.8 * u
+          const a = proj(cam, [xs - half, 0.06, zs])
+          const e = proj(cam, [xs + half, 0.06, zs])
+          if (a && e) {
+            ctx.strokeStyle = 'rgba(63,242,255,0.9)'
+            ctx.lineWidth = 2
+            ctx.shadowColor = LINK
+            ctx.shadowBlur = 10
+            ctx.beginPath()
+            ctx.moveTo(a[0], a[1])
+            ctx.lineTo(e[0], e[1])
+            ctx.stroke()
+          }
+          ctx.restore()
+        }
+      }
+      if (b) {
+        ctx.save()
+        ctx.lineWidth = 2
+        ctx.setLineDash([4, 3])
+        ctx.lineDashOffset = -sim.t * 20
+        ctx.strokeStyle = LINK
+        ctx.strokeRect(b.x, b.y, b.w, b.h)
+        ctx.restore()
+      }
+      continue
+    }
+    if (!b || !h.incident) continue
+    const color = h.scope === 'road' ? '#ffd34d' : '#3ff2ff'
+    ctx.save()
+    ctx.lineWidth = 2
+    ctx.shadowColor = color
+    ctx.shadowBlur = 6
+    brackets(ctx, b, color, 0.3)
+    ctx.shadowBlur = 0
+    const label = `${h.incident.label} ${Math.round(h.incident.confidence * 100)}%`
+    ctx.font = '7px "Press Start 2P", monospace'
+    const w = ctx.measureText(label).width + 8
+    ctx.fillStyle = color
+    ctx.fillRect(b.x, b.y + b.h + 2, w, 12)
+    ctx.fillStyle = '#1c1c24'
+    ctx.textBaseline = 'top'
+    ctx.fillText(label, b.x + 4, b.y + b.h + 5)
+    ctx.restore()
   }
 }
 
@@ -1056,11 +1266,19 @@ function tag(ctx, x, y, text, sub, opts = {}) {
 function drawTags(ctx, cam, sim) {
   for (const h of sim.hazards) {
     if (h.cleared) continue
-    const p = proj(cam, [h.x, (h.vehicle ? h.H : h.sign ? 3.6 : 0.8) + 0.6, h.z])
+    const p = proj(cam, [h.x, (h.vehicle ? h.H : h.sign ? 3.6 : Math.max(0.8, h.H)) + 0.6, h.z])
     if (!p || p[1] < 20) continue
-    tag(ctx, p[0], p[1], `! ${h.label}`, h.scope === 'road' ? 'ROAD' : `LANE ${h.lane + 1}`, {
-      fill: h.scope === 'road' ? '#ffe27a' : '#9ff6ff',
-    })
+    if (h.state === 'pending') {
+      tag(ctx, p[0], p[1], '? UNKNOWN', `LANE ${h.lane + 1} · UNSEEN`, { fill: '#e2e2dc' })
+    } else if (h.state === 'scanning') {
+      const who = sim.cars.find((c) => c.id === h.scanner)?.short ?? ''
+      const dots = '.'.repeat(1 + (Math.floor(sim.t * 4) % 3))
+      tag(ctx, p[0], p[1], `SCANNING${dots.padEnd(3)}`, `${who} · YOLO`, { fill: '#9ff6ff' })
+    } else {
+      tag(ctx, p[0], p[1], `! ${h.label}`, h.scope === 'road' ? 'ROAD' : `LANE ${h.lane + 1}`, {
+        fill: h.scope === 'road' ? '#ffe27a' : '#9ff6ff',
+      })
+    }
   }
   for (const c of sim.cars) {
     const p = proj(cam, [c.x, c.H + 0.5, c.z])
@@ -1085,6 +1303,7 @@ export function render(ctx, sim, W, H, hover) {
   for (const c of sim.cars) drawShadow(ctx, cam, c.x, c.z, c.L, c.W, c.yaw)
   for (const h of sim.hazards) if (h.vehicle) drawShadow(ctx, cam, h.x, h.z, h.L, h.W)
   drawRings(ctx, cam, sim)
+  drawIntents(ctx, cam, sim)
   drawHover(ctx, cam, hover, t)
 
   const list = []
@@ -1113,11 +1332,14 @@ export function render(ctx, sim, W, H, hover) {
       speedSignObjects(cam, h, sim, list)
     } else if (h.kind === 'custom-road') {
       crateObject(cam, h, list)
+    } else if (h.kind === 'footage') {
+      incidentObjects(cam, h, sim, list)
     }
   }
   list.sort((a, b) => b.d - a.d)
   for (const item of list) item.draw(ctx)
 
+  drawScans(ctx, cam, sim)
   drawLinks(ctx, cam, sim)
   drawTags(ctx, cam, sim)
   return cam
